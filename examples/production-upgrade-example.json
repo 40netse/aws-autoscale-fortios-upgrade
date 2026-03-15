@@ -1,0 +1,367 @@
+{
+  "upgrade_config": {
+    "upgrade_id": "production-upgrade-2024-03-15",
+    "upgrade_type": "zero_downtime_parallel_vpc",
+    "target_version": "7.4.5",
+    "license_type": "byol",
+    "environment": "production",
+    "initiated_by": "ops-team",
+    "change_request": "CHG-2024-001234"
+  },
+
+  "blue_environment": {
+    "vpc_id": "vpc-blue-security-123",
+    "vpc_cidr": "10.100.0.0/16",
+    "region": "us-east-1",
+    "current_ami": "ami-fortigate745",
+    "
+    "asg_config": {
+      "asg_name": "fortigate-prod-blue-asg",
+      "min_size": 2,
+      "max_size": 6,
+      "desired_capacity": 4,
+      "instance_type": "c6i.xlarge"
+    },
+    "network_config": {
+      "management_subnets": {
+        "us-east-1a": "subnet-blue-mgmt-1a",
+        "us-east-1b": "subnet-blue-mgmt-1b", 
+        "us-east-1c": "subnet-blue-mgmt-1c"
+      },
+      "private_subnets": {
+        "us-east-1a": "subnet-blue-priv-1a",
+        "us-east-1b": "subnet-blue-priv-1b",
+        "us-east-1c": "subnet-blue-priv-1c"
+      },
+      "public_subnets": {
+        "us-east-1a": "subnet-blue-pub-1a",
+        "us-east-1b": "subnet-blue-pub-1b", 
+        "us-east-1c": "subnet-blue-pub-1c"
+      }
+    },
+    "production_eips": {
+      "eip-prod-1a": {
+        "allocation_id": "eipalloc-12345abc",
+        "public_ip": "203.0.113.10",
+        "nat_gateway": "nat-blue-1a",
+        "az": "us-east-1a"
+      },
+      "eip-prod-1b": {
+        "allocation_id": "eipalloc-67890def", 
+        "public_ip": "203.0.113.20",
+        "nat_gateway": "nat-blue-1b",
+        "az": "us-east-1b"
+      },
+      "eip-prod-1c": {
+        "allocation_id": "eipalloc-abcde123",
+        "public_ip": "203.0.113.30", 
+        "nat_gateway": "nat-blue-1c",
+        "az": "us-east-1c"
+      }
+    },
+    "gwlb_config": {
+      "gwlb_arn": "arn:aws:elasticloadbalancing:us-east-1:123456789012:loadbalancer/gwy/blue-gwlb",
+      "target_group_arn": "arn:aws:elasticloadbalancing:us-east-1:123456789012:targetgroup/blue-tg",
+      "endpoints": {
+        "us-east-1a": "vpce-blue-1a",
+        "us-east-1b": "vpce-blue-1b",
+        "us-east-1c": "vpce-blue-1c"
+      }
+    },
+    "tgw_config": {
+      "tgw_id": "tgw-12345abcdef",
+      "attachment_id": "tgw-attach-blue-security",
+      "route_table_id": "tgw-rtb-blue-security"
+    }
+  },
+
+  "green_deployment_config": {
+    "vpc_name": "security-green-vpc",
+    "vpc_cidr": "10.100.0.0/16",
+    "reuse_blue_configuration": true,
+    "target_ami": "ami-fortigate760",
+    "deployment_strategy": "identical_parallel",
+    "initial_eip_strategy": "temporary_eips",
+    "terraform_state_file": "terraform/green-security-vpc/terraform.tfstate"
+  },
+
+  "customer_vpcs": [
+    {
+      "vpc_id": "vpc-customer-prod-a",
+      "name": "production-workloads-a",
+      "cidr": "10.1.0.0/16",
+      "tgw_attachment": "tgw-attach-customer-a",
+      "priority": "critical",
+      "migration_order": 3,
+      "validation_requirements": [
+        "connectivity_test",
+        "application_health_check", 
+        "security_policy_validation",
+        "performance_baseline_check"
+      ]
+    },
+    {
+      "vpc_id": "vpc-customer-prod-b", 
+      "name": "production-workloads-b",
+      "cidr": "10.2.0.0/16",
+      "tgw_attachment": "tgw-attach-customer-b",
+      "priority": "high",
+      "migration_order": 2,
+      "validation_requirements": [
+        "connectivity_test",
+        "security_policy_validation"
+      ]
+    },
+    {
+      "vpc_id": "vpc-customer-staging",
+      "name": "staging-environment", 
+      "cidr": "10.10.0.0/16",
+      "tgw_attachment": "tgw-attach-customer-staging",
+      "priority": "medium",
+      "migration_order": 1,
+      "validation_requirements": [
+        "connectivity_test"
+      ]
+    }
+  ],
+
+  "migration_strategy": {
+    "type": "gradual_customer_vpc_migration",
+    "canary_phase": {
+      "test_vpc": "vpc-customer-staging",
+      "validation_duration_minutes": 20,
+      "required_tests": [
+        "basic_connectivity", 
+        "security_policy_enforcement",
+        "fortigate_health_validation",
+        "performance_baseline"
+      ],
+      "success_criteria": {
+        "connectivity_success_rate": 100,
+        "security_policy_pass_rate": 100,
+        "performance_degradation_threshold": 5
+      }
+    },
+    "production_migration": {
+      "migration_method": "by_customer_vpc",
+      "validation_between_vpcs": true,
+      "validation_wait_minutes": 10,
+      "rollback_on_first_failure": true
+    },
+    "eip_migration": {
+      "timing": "after_traffic_migration",
+      "method": "parallel_by_az",
+      "validation_required": true,
+      "rollback_on_failure": true
+    }
+  },
+
+  "validation_framework": {
+    "canary_validation": {
+      "connectivity_tests": [
+        {
+          "name": "internet_connectivity",
+          "source_vpc": "vpc-customer-staging",
+          "target": "8.8.8.8",
+          "protocol": "icmp",
+          "expected_result": "success",
+          "timeout_seconds": 30
+        },
+        {
+          "name": "https_connectivity",
+          "source_vpc": "vpc-customer-staging",
+          "target": "https://www.google.com",
+          "protocol": "https", 
+          "expected_result": "success",
+          "timeout_seconds": 30
+        }
+      ],
+      "security_policy_tests": [
+        {
+          "name": "malware_blocking",
+          "source_vpc": "vpc-customer-staging",
+          "target": "http://malware.wicar.org/data/eicar.com",
+          "expected_result": "blocked",
+          "validation_method": "fortigate_logs"
+        },
+        {
+          "name": "web_filtering", 
+          "source_vpc": "vpc-customer-staging",
+          "target": "http://www.exampleadultsite.com",
+          "expected_result": "blocked",
+          "validation_method": "fortigate_logs"
+        }
+      ],
+      "performance_tests": [
+        {
+          "name": "latency_baseline",
+          "source_vpc": "vpc-customer-staging",
+          "target": "8.8.8.8",
+          "metric": "round_trip_time",
+          "baseline_ms": 25,
+          "threshold_increase_percent": 20
+        },
+        {
+          "name": "throughput_test",
+          "source_vpc": "vpc-customer-staging", 
+          "target": "speedtest.fortinet.com",
+          "metric": "download_speed_mbps",
+          "baseline_mbps": 500,
+          "threshold_decrease_percent": 10
+        }
+      ]
+    },
+    "production_validation": {
+      "per_vpc_tests": [
+        "basic_connectivity",
+        "application_health_checks",
+        "security_policy_spot_check"
+      ],
+      "final_validation": [
+        "comprehensive_connectivity_matrix",
+        "performance_comparison_blue_vs_green",
+        "security_policy_comprehensive_test",
+        "fortigate_cluster_health_check"
+      ]
+    }
+  },
+
+  "rollback_configuration": {
+    "automatic_rollback_triggers": [
+      {
+        "condition": "connectivity_failure",
+        "threshold": "any_customer_vpc_loses_internet",
+        "action": "immediate_emergency_rollback",
+        "notification_priority": "critical"
+      },
+      {
+        "condition": "security_policy_violation",
+        "threshold": "blocked_traffic_passes_through", 
+        "action": "immediate_emergency_rollback",
+        "notification_priority": "critical"
+      },
+      {
+        "condition": "performance_degradation",
+        "threshold": "latency_increase_greater_than_50_percent",
+        "action": "immediate_emergency_rollback", 
+        "notification_priority": "high"
+      },
+      {
+        "condition": "fortigate_health_failure",
+        "threshold": "more_than_one_instance_unhealthy",
+        "action": "immediate_emergency_rollback",
+        "notification_priority": "high"
+      },
+      {
+        "condition": "eip_migration_failure",
+        "threshold": "any_eip_association_fails",
+        "action": "rollback_eips_continue_upgrade",
+        "notification_priority": "medium"
+      }
+    ],
+    "manual_rollback": {
+      "approval_required": false,
+      "emergency_contact": "+1-555-123-4567",
+      "escalation_time_minutes": 15
+    },
+    "rollback_validation": {
+      "blue_environment_health_check": true,
+      "customer_vpc_connectivity_validation": true,
+      "eip_restoration_validation": true,
+      "performance_restoration_validation": true
+    }
+  },
+
+  "monitoring_and_alerting": {
+    "sns_topics": {
+      "upgrade_progress": "arn:aws:sns:us-east-1:123456789012:fortigate-upgrade-progress",
+      "critical_alerts": "arn:aws:sns:us-east-1:123456789012:fortigate-upgrade-critical",
+      "operational_updates": "arn:aws:sns:us-east-1:123456789012:fortigate-upgrade-ops"
+    },
+    "cloudwatch_dashboards": [
+      "fortigate-upgrade-progress",
+      "blue-green-environment-health", 
+      "customer-vpc-connectivity",
+      "eip-migration-status"
+    ],
+    "custom_metrics": [
+      "upgrade_progress_percentage",
+      "blue_environment_health_score",
+      "green_environment_health_score", 
+      "customer_vpc_connectivity_status",
+      "eip_migration_progress"
+    ],
+    "alert_escalation": {
+      "level_1": ["ops-team@company.com"],
+      "level_2": ["network-team-lead@company.com", "ops-manager@company.com"],
+      "level_3": ["cto@company.com", "network-director@company.com"]
+    }
+  },
+
+  "compliance_and_audit": {
+    "change_management": {
+      "change_request_id": "CHG-2024-001234",
+      "approval_required": true,
+      "approved_by": "network-change-board",
+      "approved_date": "2024-03-14T15:30:00Z"
+    },
+    "audit_requirements": {
+      "log_retention_days": 90,
+      "configuration_backup": true,
+      "step_by_step_documentation": true,
+      "success_metrics_reporting": true
+    },
+    "compliance_frameworks": [
+      "SOC2",
+      "PCI-DSS",
+      "HIPAA"
+    ]
+  },
+
+  "cleanup_configuration": {
+    "blue_environment_retention": {
+      "duration": "48_hours",
+      "retention_triggers": [
+        "green_environment_stable_for_48h",
+        "no_rollback_events_in_48h",
+        "manual_cleanup_approval_received"
+      ]
+    },
+    "cleanup_order": [
+      "blue_tgw_route_table_deletion",
+      "blue_tgw_vpc_attachment_deletion", 
+      "blue_gwlb_endpoints_deletion",
+      "blue_gwlb_deletion",
+      "blue_target_group_deletion",
+      "blue_fortigate_asg_deletion",
+      "blue_vpc_deletion"
+    ],
+    "preservation_requirements": [
+      "upgrade_execution_logs",
+      "performance_metrics_during_upgrade",
+      "validation_test_results",
+      "configuration_backup_files"
+    ]
+  },
+
+  "operational_contacts": {
+    "primary_operator": {
+      "name": "Network Operations Team",
+      "email": "netops@company.com",
+      "phone": "+1-555-123-4567",
+      "escalation_time_minutes": 15
+    },
+    "secondary_contact": {
+      "name": "Network Engineering Manager", 
+      "email": "neteng-mgr@company.com",
+      "phone": "+1-555-123-4568",
+      "escalation_time_minutes": 30
+    },
+    "emergency_contact": {
+      "name": "Network Director",
+      "email": "network-director@company.com", 
+      "phone": "+1-555-123-4569",
+      "escalation_time_minutes": 60
+    }
+  }
+}
