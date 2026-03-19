@@ -442,91 +442,75 @@ claude create lambda/cleanup-manager/main.py \
 
 ### Blue Cleanup Safety Protocol
 
-**Critical Warning**: Never run `terraform destroy` on the Blue state without first auditing the state file. The customer's Blue state file is the ground truth — **it may not match current templates**. Deployments from older versions of the Autoscale-Simplified-Template may have different resource layouts, module structures, or state organization. Always discover what is actually in the state before taking any action.
+**Critical Warning**: Never run `terraform destroy` on the Blue state without first auditing
+the state file. The customer's Blue state file is the ground truth — **it may not match
+current templates**. Customers who deployed in August or earlier may have different resource
+layouts, module structures, or state organization than what the current templates produce.
+Always discover what is actually in the state before taking any action.
 
-The core risk: if the Transit Gateway (TGW) was created as part of the Blue terraform state, `terraform destroy` will destroy it — taking down the GREEN environment too.
+**Pre-condition**: TGW route table updates must be complete before running cleanup.
+The TGW orchestrator must have already switched all customer VPC route table associations
+to point to Green's attachment. The TGW route tables and routes are preserved — they now
+serve Green and must not be destroyed.
 
-#### Step 1: Audit the Actual Blue State (Read-Only)
+#### TGW Resource Classification
+
+| Resource | Action | Reason |
+|----------|--------|--------|
+| `aws_ec2_transit_gateway` | **Preserve** (`state rm`) | Shared — Green depends on it |
+| `aws_ec2_transit_gateway_route_table` | **Preserve** (`state rm`) | Already updated to route to Green |
+| `aws_ec2_transit_gateway_route` | **Preserve** (`state rm`) | Already point to Green attachment |
+| `aws_ec2_transit_gateway_route_table_association` | **Preserve** (`state rm`) | Customer VPC associations |
+| `aws_ec2_transit_gateway_route_table_propagation` | **Preserve** (`state rm`) | Route propagations |
+| `aws_ec2_transit_gateway_vpc_attachment` (Blue) | **Destroy** | Blue-specific — Green has its own |
+| All Blue VPC resources | **Destroy** | Blue-specific |
+
+"Preserve (`state rm`)" means removed from Terraform state so `terraform destroy` does not
+touch it — the physical AWS resource is completely unchanged.
+
+#### Use the Automation Script
+
+`scripts/blue_cleanup.py` handles the full sequence automatically:
 
 ```bash
-# From the customer's Blue terraform directory (wherever their state backend points)
+# Dry run first — reads state, classifies resources, shows plan. No changes made.
+python scripts/blue_cleanup.py \
+  --terraform-dir /path/to/customer/blue/terraform \
+  --dry-run
+
+# Execute cleanup (interactive confirmation gates at each step)
+python scripts/blue_cleanup.py \
+  --terraform-dir /path/to/customer/blue/terraform
+```
+
+The script:
+1. Runs `terraform state list` to discover what is actually in the state
+2. Classifies every resource as preserved or destroyable (pattern-matched, not hardcoded)
+3. Prints the full classification for review before touching anything
+4. Runs `terraform state rm` on all preserved resources (non-destructive)
+5. Runs `terraform plan -destroy` for final human review
+6. Asks for confirmation before running `terraform destroy`
+
+#### Manual Commands (if needed)
+
+```bash
+# Audit state — always do this first
 terraform state list
-```
 
-Scan the output for any TGW-related resources:
-```
-# Resources to look for:
-module.vpc-transit-gateway[0].aws_ec2_transit_gateway.main
-module.vpc-transit-gateway-attachment-east[0].aws_ec2_transit_gateway_vpc_attachment.main
-aws_ec2_transit_gateway_route_table.*
-aws_ec2_transit_gateway_route.*
-```
-
-#### Step 2: Preview the Full Blast Radius (Read-Only)
-
-```bash
+# Preview blast radius — read only
 terraform plan -destroy
-```
 
-This is a dry run — nothing changes. Read the full output carefully. You are specifically checking for:
-- `aws_ec2_transit_gateway`
-- `aws_ec2_transit_gateway_vpc_attachment`
-- `aws_ec2_transit_gateway_route_table`
-- `aws_ec2_transit_gateway_route`
-
-If any of these appear and GREEN depends on them, stop and use `terraform state rm` before proceeding.
-
-#### Step 3: Detach Shared Resources from Blue State (Non-Destructive)
-
-`terraform state rm` removes a resource from the state file **without destroying it in AWS**. The physical TGW stays intact. After this command, `terraform destroy` has no knowledge of the TGW and will not touch it.
-
-```bash
-# Remove TGW itself
+# Detach a specific shared resource (AWS resource unchanged)
 terraform state rm 'module.vpc-transit-gateway[0].aws_ec2_transit_gateway.main'
 
-# Remove TGW attachments
-terraform state rm 'module.vpc-transit-gateway-attachment-east[0].aws_ec2_transit_gateway_vpc_attachment.main'
-terraform state rm 'module.vpc-transit-gateway-attachment-west[0].aws_ec2_transit_gateway_vpc_attachment.main'
-
-# Remove TGW routes and route tables that GREEN now owns
-terraform state rm 'aws_ec2_transit_gateway_route.east-default-route-to-inspection'
-terraform state rm 'aws_ec2_transit_gateway_route.west-default-route-to-inspection'
-```
-
-Exact resource addresses depend on the customer's actual state — use the `terraform state list` output from Step 1 as your reference, not any template file.
-
-#### Step 4: Confirm Remaining Resources Are Blue-Only
-
-```bash
-# Run plan -destroy again to verify only Blue-specific resources remain
-terraform plan -destroy
-```
-
-Review: only the Blue Security VPC, its subnets, NAT gateways, FortiGate ASG, GWLB, and related resources should be listed now.
-
-#### Step 5: Safe Destroy
-
-```bash
+# Final destroy — only after state rm for all shared resources
 terraform destroy
 ```
 
 #### Why Not `terraform state mv`?
 
-`terraform state mv` moves a resource between two state files — useful if you want Green's Terraform to start managing the TGW. However, this requires:
-- Both state files accessible simultaneously
-- Matching resource address structure between Blue and Green states
-- The module hierarchy to be compatible
-
-Since GREEN discovers TGW via `Fortinet-Role` tags (data sources) rather than managing it via state, there is nothing to transfer. `terraform state rm` is simpler and lower risk.
-
-#### Summary
-
-| Command | What It Does | Risk |
-|---------|-------------|------|
-| `terraform state list` | List all resources in Blue state | None — read only |
-| `terraform plan -destroy` | Preview every resource that would be destroyed | None — read only |
-| `terraform state rm <addr>` | Detach a resource from state (AWS resource unchanged) | Low — reversible with `terraform import` |
-| `terraform destroy` | Destroy everything remaining in state | Permanent — only run after audit + state rm |
+Green discovers TGW via `Fortinet-Role` tags (data sources), not Terraform state ownership.
+There is nothing to transfer. `terraform state rm` is simpler and lower risk.
 
 ---
 

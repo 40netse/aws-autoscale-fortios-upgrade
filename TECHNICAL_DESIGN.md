@@ -422,25 +422,77 @@ def migrate_production_eips():
 ```
 
 ### Phase 5: Blue Environment Cleanup
+
+**Pre-condition**: TGW route table updates must be complete before this phase runs.
+By this point the TGW orchestrator has already switched all customer VPC route table
+associations to point to Green's attachment. The TGW route tables and routes are
+preserved — they now serve Green traffic and must not be destroyed.
+
+#### TGW Resource Classification
+
+| Resource | Action | Reason |
+|----------|--------|--------|
+| `aws_ec2_transit_gateway` | **Preserve** (state rm) | Shared — Green depends on it |
+| `aws_ec2_transit_gateway_route_table` | **Preserve** (state rm) | Already updated to route to Green |
+| `aws_ec2_transit_gateway_route` | **Preserve** (state rm) | Already point to Green attachment |
+| `aws_ec2_transit_gateway_route_table_association` | **Preserve** (state rm) | Customer VPC associations |
+| `aws_ec2_transit_gateway_route_table_propagation` | **Preserve** (state rm) | Route propagations |
+| `aws_ec2_transit_gateway_vpc_attachment` (Blue) | **Destroy** | Blue-specific — Green has its own |
+| All Blue VPC resources | **Destroy** | Blue-specific |
+
+"Preserve (state rm)" means the resource is removed from the Terraform state file
+so `terraform destroy` does not touch it — the physical AWS resource is unchanged.
+
+#### Safe Cleanup Sequence
+
 ```python
 def cleanup_blue_environment():
     """
-    Remove Blue environment after stability period
+    Remove Blue environment after stability period.
+    Pre-condition: TGW route tables already updated to point to Green.
     """
     # 1. Validate Green environment stability
     monitor_green_stability(duration="24h")
-    
-    # 2. Clean up Blue TGW route table  
-    delete_tgw_route_table(blue_route_table)
-    
-    # 3. Detach Blue VPC from TGW
-    detach_vpc_from_tgw(blue_vpc_attachment)
-    
-    # 4. Destroy Blue Security VPC (via Terraform)
-    terraform_destroy(blue_security_vpc_state)
-    
+
+    # 2. Audit Blue Terraform state — never assume what's in it.
+    #    Customer may have deployed from an older template version.
+    resources = terraform_state_list(blue_terraform_dir)
+
+    # 3. Detach shared TGW resources from Blue state (non-destructive).
+    #    The TGW attachment is NOT in this list — it is Blue-specific and
+    #    will be destroyed along with the rest of the Blue VPC.
+    shared_resources = classify_shared_tgw_resources(resources)
+    for resource in shared_resources:
+        terraform_state_rm(resource)  # AWS resource unchanged
+
+    # 4. Preview what will be destroyed — review before proceeding.
+    terraform_plan_destroy(blue_terraform_dir)
+
+    # 5. Destroy Blue VPC, subnets, NAT gateways, ASG, GWLB,
+    #    and Blue TGW attachment.
+    terraform_destroy(blue_terraform_dir)
+
     return cleanup_complete
 ```
+
+#### Automation
+
+The `scripts/blue_cleanup.py` script implements this sequence with interactive
+confirmation gates:
+
+```bash
+# Dry run first — no changes made
+python scripts/blue_cleanup.py \
+  --terraform-dir /path/to/customer/blue/terraform \
+  --dry-run
+
+# Execute cleanup
+python scripts/blue_cleanup.py \
+  --terraform-dir /path/to/customer/blue/terraform
+```
+
+The script detects TGW resources automatically from `terraform state list` output
+regardless of how the customer originally deployed (template version does not matter).
 
 ---
 
